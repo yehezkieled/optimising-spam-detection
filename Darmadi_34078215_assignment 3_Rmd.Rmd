@@ -1,0 +1,575 @@
+---
+title: "ass1&3"
+author: "Yehezkiel"
+date: "2024-03-11"
+output: html_document
+---
+
+# Optimizing Spam Email Detection: A Dual Strategy of Resampling and Ensemble Learning
+
+## Data
+This section is used to download the data from kaggle.
+-----
+
+First, install and then import the library
+```{r install library}
+# install.packages(c("devtools"))
+# devtools::install_github("ldurazo/kaggler")
+# install.packages("psych")
+# install.packages("caret")
+# install.packages("boot")
+# install.packages("randomForest")
+# install.packages("e1071")
+# install.packages("caTools")
+# install.packages("xgboost")
+# install.packages("pROC")
+```
+
+```{r import library}
+# import library
+library(tidyverse)
+library(readr)
+library(kaggler)
+library(ggplot2)
+library(naniar)
+library(psych)
+library(tm)
+library(textstem)
+library(caret)
+library(wordcloud2)
+library(boot)
+library(randomForest)
+library(e1071)
+library(caTools)
+library(xgboost)
+library(pROC)
+```
+
+Then, create the kaggle API from this website {https://www.kaggle.com/docs/api}, put the api in the same file as the Rmd file. Then, import it
+```{r authorize credential}
+kgl_auth(creds_file = 'kaggle.json')
+```
+
+Create a function to download the data from kaggle directly. The link for the website is as below:
+{https://www.kaggle.com/datasets/jackksoncsie/spam-email-dataset}
+```{r download data function}
+download_data <- function(user_dataset, file_name){
+  # retrive files
+  response = kgl_datasets_download_all(
+    owner_dataset = user_dataset
+  )
+  
+  # check if the data exist, if does not exist proceed with the download
+  if (!file.exists(paste0("data/", file_name, ".zip"))){
+    download.file(response[["url"]], paste0("data/", file_name, ".zip"), mode="wb") 
+  }
+}
+```
+
+Download the data.
+```{r download data}
+download_data("jackksoncsie/spam-email-dataset", "new_spam_data")
+```
+
+Unzipping the files.
+```{r unzipping file}
+spam_unzip_result <- unzip("data/new_spam_data.zip", exdir = "data/", overwrite = TRUE)
+print(spam_unzip_result)
+```
+
+Next, the data is imported.
+```{r import the data}
+spam_data <- read_csv(spam_unzip_result)
+head(spam_data)
+```
+
+# Exploratory Data Analysis and Wrangling
+Below are the things that we are going to analyze in this section:
+
+1. Statistic Summary
+
+2. Missing Values
+
+3. Duplicate Records
+
+4. Visualization
+
+## Statistic Summary
+To make it easier, let's change the column name "spam" into "label", which indicates the following text is labeled spam or not.
+```{r change colname}
+colnames(spam_data)[2] <- "label"
+colnames(spam_data)
+```
+
+Create a new columng called "text_length" to show the length of the text.
+```{r create text_length column}
+spam_data <- spam_data %>%
+  mutate(text_length = nchar(text))
+
+str(spam_data)
+```
+
+Next, let's begin with statistic summary and let's see the very first row of the data.
+```{r data summary}
+# first row of the data
+print(spam_data[1,]$text)
+print(spam_data[1,]$label)
+print(spam_data[1,]$text_length)
+# data summary
+str(spam_data)
+summary(spam_data)
+desc_df <- psych::describe(spam_data[, c("label", "text_length")])
+desc_df <- desc_df %>%
+  select(mean, sd, median)
+desc_df
+```
+
+We can see that the data has 2 columns an 5728 rows. The data also shows that the text column hasn't been pre-processed additionally, the "label" column shows "1" as spam and "0" as not spam. 
+
+The label column statistic also shows that the mean is 0.2388, which might be indicating that the data is imbalance, if the data is balanced then it should have been around the 0.5. The mean shows that most likely the "0" or not spam data is larger than the "1" or spam data. This imbalance dataset could potentially make the model perform poorly.
+
+## Missing Values
+Let's check whether the data have null values or not.
+```{r checking null values}
+na_count_per_column <- colSums(is.na(spam_data))
+print(na_count_per_column)
+
+miss_var_summary(spam_data)
+```
+
+We can see that there is no missing value in the data.
+
+## Duplicate Records
+Let's see whether the data has duplicate records,
+```{r duplicate data count}
+print(paste("Number of records: ", nrow(spam_data)))
+unique_row <- spam_data %>% 
+  count(text, label) %>% 
+  filter(n > 1)
+print(paste("Number of duplicates records: ", nrow(unique_row)))
+print(paste("Number of unique record: ", nrow(spam_data) - nrow(unique_row)))
+```
+
+We can see that there are 33 duplicate data inside the spam_data, which we will remove. But, let's see what the data is about.
+
+```{r duplicate data view}
+head(unique_row %>% select(-n))
+```
+Let's remove those duplicates.
+```{r remove duplicate}
+# remove duplicate
+spam_data <- unique(spam_data)
+# check the number of data now
+print(paste("The number of row: ", nrow(spam_data)))
+```
+The number of row is the same as the unique number of row in the previous result, thus the duplicate data has been deleted.
+
+## Visualisatioin
+Let's see the histogram of the "label" data.
+```{r histogram spam vs not-spam}
+ggplot(spam_data, aes(x = factor(label, labels = c("Non-Spam", "Spam")))) + 
+  geom_bar() + 
+  ggtitle("Spam vs Non-Spam Data ") +
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  xlab("Label")
+```
+
+As we can see, that the data is imbalance.
+
+The sd of the "text_length" shows that the column has outliers because it is too varied.
+Thus, let's remove the text which has long text or the outilers.
+```{r search_outliers}
+# check the highest text_length
+head(sort(spam_data$text_length, decreasing = TRUE), 50)
+
+# add new column to classify the text_length
+spam_data <- spam_data %>%
+  mutate(text_length_classification = floor(text_length/1000))
+  
+# grouping by the classifier
+classified_spam_data <- spam_data %>%
+  group_by(text_length_classification) %>%
+  summarise(num_of_row = n()) %>%
+  arrange(desc(text_length_classification))
+classified_spam_data
+
+# summing num_of_row with text_legnth_classification 9 and above
+total_sum <- sum(
+  classified_spam_data[classified_spam_data$text_length_classification >= 10, ]$num_of_row
+)
+total_sum
+
+# outliers percentage
+total_sum/nrow(spam_data)*100
+```
+It can be seen that the number of rows that has text_length more than 10000 us 0.81% of the data. Thus it is reasonable for us to erase the data.
+
+```{r remove_outliers}
+# remove outliers
+spam_data <- spam_data %>%
+  filter(text_length_classification <= 9) %>%
+  select(-text_length_classification)
+
+# check the data
+head(sort(spam_data$text_length, decreasing = TRUE), 50)
+```
+
+Let's see the new distribution of the text_length.
+```{r text_length dist 2}
+ggplot(spam_data, aes(x = text_length)) +
+  geom_bar() + 
+  ggtitle("Text Length Distribution") +
+  xlab("Length of Text") + ylab("Frequency")
+```
+
+# Data Preprocessing
+Below are the things that we are going to do in this section:
+
+1. Remove punctuation
+
+2. Lowering cases
+
+3. Remove stop words
+
+4. Lemmatization
+
+5. Identify spam and not spam words using N-gram model
+
+```{r text preprocessing}
+# spam_data$doc_id <- seq(nrow(spam_data))
+# spam_data_source <- DataframeSource(spam_data %>% select(doc_id, text))
+spam_data_token <- Corpus(VectorSource(spam_data$text))
+spam_data_token
+# remove stop words
+spam_data_token <- tm_map(spam_data_token, removeWords, stopwords("english")) 
+# remove punctuation
+spam_data_token <- tm_map(spam_data_token, removePunctuation) 
+# remove all numbers
+spam_data_token <- tm_map(spam_data_token, removeNumbers)
+# remove redundant spaces
+spam_data_token <- tm_map(spam_data_token, stripWhitespace) 
+# case normalisation
+spam_data_token <- tm_map(spam_data_token, content_transformer(tolower))
+
+# Define a function to lemmatise the text
+lemmatise_text <- function(text) {
+  lemmatised <- lemmatize_strings(text)
+  return(lemmatised)
+}
+
+# Apply lemmatisation to the corpus
+spam_data_lemmatized <- tm_map(spam_data_token, content_transformer(lemmatise_text))
+inspect(spam_data_lemmatized[1])
+```
+
+Let's replace the "text" column on the "spam_data" with the "spam_data_lemmatized".
+```{r add preprocessed_text col}
+text_lemmatized <- sapply(spam_data_lemmatized, as.character)
+spam_data$preprocessed_text <- text_lemmatized
+print(spam_data$text[1])
+print(spam_data$preprocessed_text[1])
+```
+Let's see the unigram visualisation.
+```{r unigram function}
+uni_frequent_terms <- function(text) {
+  # tokenization
+  spam_data_token_uni <- Corpus(VectorSource(text))
+  
+  #  Create a matrix which its rows are the documents and columns are the words. 
+  spam_data_token_uni_dtm <- DocumentTermMatrix(spam_data_token_uni)
+  
+  # Convert the DocumentTermMatrix into a regular matrix object and calculate term frequencies
+  term_freq <- colSums(as.matrix(spam_data_token_uni_dtm))
+  
+  # Create a dataframe
+  df<- data.frame(term = names(term_freq), freq = term_freq)
+  
+  return(df)
+}
+```
+```{r visualize the unigram}
+# common words in all dataset
+common_uni_df <- uni_frequent_terms(spam_data$preprocessed_text)
+# Select the top 10 frequent words
+top_common_uni_df <- common_uni_df %>%
+  arrange(desc(freq)) %>%
+  head(10)
+
+wordcloud2(top_common_uni_df, color = "random-dark", backgroundColor = "white")
+
+# common words in only spam data
+common_uni_spam_df <- uni_frequent_terms(spam_data[spam_data$label == 1,])
+top_common_uni_spam_df <- common_uni_spam_df %>%
+  arrange(desc(freq)) %>%
+  head(10)
+wordcloud2(top_common_uni_spam_df, color = "random-dark", backgroundColor = "white")
+
+# common words in not spam data
+common_uni_not_spam_df <- uni_frequent_terms(spam_data[spam_data$label == 0,])
+top_common_uni_not_spam_df <- common_uni_not_spam_df %>%
+  arrange(desc(freq)) %>%
+  head(10)
+wordcloud2(top_common_uni_not_spam_df, color = "random-dark", backgroundColor = "white")
+```
+
+
+# Data Modelling
+Below are the steps to do the data modelling:
+
+1. Split data into training and test dataset
+
+2. Resampling the train dataset
+
+3. Create the models
+
+4. Evaluate the models
+
+## Split data
+First let's split the data into training and test dataset. The test dataset needs to represent the real-world scenario, thus the test dataset won't get resampled. The ratio of training and test is 80/20.
+
+```{r split dataset}
+# create corpus for TF-IDF
+corpus <- Corpus(VectorSource(spam_data$preprocessed_text))
+# create dtm
+dtm <- DocumentTermMatrix(corpus)
+# convert to data frame
+text_matrix <- as.data.frame(as.matrix(dtm))
+colnames(text_matrix) <- make.names(make.names(colnames(text_matrix)))
+# ensuring that the target variable is a factor
+spam_data$label <- as.factor(spam_data$label)
+# Bind the features with the text_length
+final_data <- cbind(text_matrix, spam_data$text_length, spam_data$label)
+
+
+# setting seed
+set.seed(42)
+# getting the training index
+train_index <- createDataPartition(spam_data$label, p=0.80, list = FALSE)
+
+#getting the train dataset
+train_data <- final_data[train_index, ]
+#getting the test dataset
+test_data <- final_data[-train_index, ]
+```
+
+Let's check the value of each dataset.
+```{r train dataset exploration}
+print(paste(
+  "The training data has ", dim(train_data)[1], " rows"
+))
+print(paste(
+  "The test data has ", dim(test_data)[1], " rows"
+))
+```
+
+## Resampling Data
+Since the data is biased, we are going to attempt at resampling the dataset to make the model not biased on the training dataset.
+
+The method that we are going to use is in the report are as below:
+
+- SMOTE
+
+- Random Under-Sampling
+
+- Bootstrapping
+
+However, for the demonstration, we are going to perform one of the resampling method.
+Since the data is not a lot and it is already cleaned, we are going to use the Bootstrapping technique to resampled the data.
+
+```{r bootstrapping}
+#split the data into majority and minority
+majority <- train_data[train_data$label == 0,]
+minority <- train_data[train_data$label == 1,]
+
+# bootstraping the minority data
+bootstrap_minority <- minority[sample(nrow(minority), size = nrow(majority), replace = TRUE), ]
+
+print(paste(
+  "The new row of the minority ", nrow(bootstrap_minority)
+))
+
+balanced_tr_data <- rbind(majority, bootstrap_minority)
+```
+
+## Modelling
+The model that is going to be implemented:
+
+1. Random Forest
+
+2. SVM
+
+3. XGBoost
+
+4. Ensemble learning
+
+Let's prepare the data first
+```{r seperate the train_labels}
+# getting the target variable from the balanced_tr_data
+train_labels <- balanced_tr_data$`spam_data$label`
+# removing the target variable from the train dataset and replacing the train_data with the balanced_tr_data
+train_data <- balanced_tr_data %>%
+  select(-`spam_data$label`)
+```
+### Random Forest
+```{r random forest}
+set.seed(42)
+rf_model <- randomForest(
+  x = train_data, 
+  y = train_labels, 
+  ntree = 100
+)
+```
+
+Let's predict the train labels using the model.
+```{r confusion matrix train data RF}
+predictions_rf <- predict(rf_model, train_data)
+conf_mat_rf <- confusionMatrix(predictions_rf, train_labels, positive = "1")
+print(conf_mat_rf)
+```
+
+### SVM
+```{r SVM}
+set.seed(42)
+svm_model <- svm(
+  train_data, 
+  train_labels, 
+  kernel = "radial", 
+  cost = 1, 
+  gamma = 1/nrow(train_data)
+)
+```
+
+Let's predict the train label using the model.
+```{r confusion matrix train data SVM}
+predictions_svm <- predict(svm_model, train_data)
+conf_mat_svm <- confusionMatrix(predictions_svm, train_labels, positive = "1")
+print(conf_mat_svm)
+```
+### XGBoost
+```{r XGBoost}
+set.seed(42)
+train_matrix <- xgb.DMatrix(data = as.matrix(train_data), label = train_data[[1]])
+params <- list(objective = "binary:logistic", max_depth = 3, eta = 0.1)
+xgb_model <- xgb.train(params = params, data = train_matrix, nrounds = 500)
+```
+Let's predict the train label using the model.
+```{r confusion matrix train data XGBoost}
+xgb_predict <- predict(xgb_model, train_matrix)
+predictions_xgb <- ifelse(xgb_predict > 0.5, 1, 0)
+conf_mat_xgb <- confusionMatrix(factor(predictions_xgb), train_labels, positive = "1")
+conf_mat_xgb
+```
+### Enseble Learning
+Let's combine the predictions from the 3 models above.
+```{r ensemble learning}
+predictions_df <- data.frame(
+  RandomForest = as.numeric(predictions_rf) - 1,
+  SVM = as.numeric(predictions_svm) - 1,
+  XGBoost = predictions_xgb
+)
+
+predictions_df$ensemble_avg <- rowMeans(predictions_df)
+
+final_predictions <- ifelse(predictions_df$ensemble_avg > 0.5, 1, 0)
+
+conf_mat_final <- confusionMatrix(factor(final_predictions), train_labels, positive = "1")
+print(conf_mat_final)
+```
+## Model Evaluation
+The model evaluation will be using the test dataset.
+First, let's extract the target variable from the test dataset
+```{r testdata label extraction}
+# seperate the labels from the test_dataset
+test_labels <- test_data$`spam_data$label`
+# removing the target variable from the train dataset
+test_data <- test_data %>%
+  select(-`spam_data$label`)
+```
+Then, let's predict the test dataset with the models.
+```{r test dataset prediction}
+test_predictions_rf <- predict(rf_model, test_data)
+test_predictions_svm <- predict(svm_model, test_data)
+test_matrix <- xgb.DMatrix(data = as.matrix(test_data), label = test_data[[1]])
+test_xgb_predict <- predict(xgb_model, test_matrix)
+test_predictions_xgb <- ifelse(test_xgb_predict > 0.5, 1, 0)
+```
+Let's check the ensemble learning model.
+```{r ensemble learning testdata}
+test_predictions_df <- data.frame(
+  RandomForest = as.numeric(test_predictions_rf) - 1,
+  SVM = as.numeric(test_predictions_svm) - 1,
+  XGBoost = test_predictions_xgb
+)
+
+test_predictions_df$ensemble_avg <- rowMeans(test_predictions_df)
+
+test_final_predictions <- ifelse(test_predictions_df$ensemble_avg > 0.5, 1, 0)
+
+test_conf_mat_final <- confusionMatrix(factor(test_final_predictions), test_labels, positive = "1")
+print(test_conf_mat_final)
+```
+```{r confusion matrix visualisation}
+conf_matrix_table <- as.data.frame(test_conf_mat_final$table)
+# create plot
+ggplot(data = conf_matrix_table, aes(x = Reference, y = Prediction, fill = Freq)) +
+  geom_tile(color = "white") +  # Use geom_tile() to create tiles for the matrix
+  geom_text(aes(label = Freq), vjust = 1.5, color = "black", size = 5) +
+  scale_fill_gradient(low = "lightblue", high = "red") +  # More vibrant color scale
+  labs(title = "Confusion Matrix", x = "Actual Label", y = "Predicted Label") +
+  theme_minimal() +  # A minimal theme
+  theme(axis.text = element_text(size = 12), 
+        axis.title = element_text(size = 14, face = "bold"), 
+        title = element_text(size = 16, face = "bold"))
+```
+
+Getting the evaluation metrix from the confusion matrix.
+```{r evaluation metrics}
+# getting the evaluation matrix from the confusion matrix
+accuracy <- test_conf_mat_final$overall["Accuracy"]
+precision <- test_conf_mat_final$byClass["Pos Pred Value"]
+specificity <- test_conf_mat_final$byClass["Specificity"]
+recall <- test_conf_mat_final$byClass["Sensitivity"]
+f1_score <- 2*(precision*recall)/(precision + recall)
+
+# combine it together
+metrics <- data.frame(
+  Metric = c("Accuracy", "Specificity", "Recall", "F1 Score"),
+  Value = c(accuracy, specificity, recall, f1_score)
+)
+
+# Print the metrics
+print(metrics)
+```
+
+Create ROC and AUC.
+```{r ROC and AUC}
+roc_enseble <- roc(test_labels ~ test_final_predictions)
+auc_enseble <- auc(roc_enseble)
+
+# Convert ROC data to a data frame for ggplot
+roc_data <- data.frame(
+  TPR = roc_enseble$sensitivities,  # True Positive Rate
+  FPR = roc_enseble$specificities,  # False Positive Rate
+  cutoffs = roc_enseble$thresholds
+)
+
+# Create the plot
+ggplot(data = roc_data, aes(x = FPR, y = TPR)) +
+  geom_line(color = "blue", linewidth = 1) +
+  geom_area(aes(ifelse(FPR <= 1, FPR, NA)), fill = "skyblue", alpha = 0.2) +
+  labs(title = "ROC Curve", x = "False Positive Rate (1 - Specificity)", 
+       y = "True Positive Rate (Sensitivity)") +
+  geom_text(x = 0.5, y = 0.2, label = paste("AUC =", round(auc_enseble, 2)), size = 5, color = "red") +
+  theme_minimal()
+```
+
+
+
+
+
+
+
+
+
+
+
